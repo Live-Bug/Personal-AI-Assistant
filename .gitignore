@@ -60,3 +60,7 @@ ehthumbs.db
 
 # Scratch scripts
 scratch/
+
+# Downloaded at build time by app/build.gradle.kts (sherpa-onnx speech models)
+app/src/main/assets/asr/
+app/libs/

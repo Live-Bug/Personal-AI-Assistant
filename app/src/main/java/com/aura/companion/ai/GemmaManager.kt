@@ -14,30 +14,51 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 
 enum class GemmaState {
-    NOT_LOADED, LOADING, READY, INFERRING, ERROR
+    NOT_LOADED, // weights not in memory; loaded on the next request
+    LOADING,
+    READY,      // loaded and idle
+    INFERRING,
+    ERROR       // no model file, or it failed to load
+}
+
+/** What Gemma pulled out of one conversation (or one chunk of a long one). */
+data class ConversationInsights(
+    val title: String,
+    val summary: String,
+    val actionItems: List<Pair<String, String>>, // task title to deadline ("" if none)
+    val memories: List<String>
+) {
+    val isEmpty get() = summary.isBlank() && actionItems.isEmpty() && memories.isEmpty()
 }
 
 /**
  * On-device Gemma 4 E2B running through LiteRT-LM.
  *
- * One [Engine] holds the model weights for the app's lifetime. Every call below is a
- * stateless one-shot, so each opens a short-lived Conversation and closes it afterwards;
- * LiteRT-LM applies the Gemma chat template itself, so prompts are plain text.
+ * The model (~2.3 GB) is loaded on demand and released after [IDLE_UNLOAD_MS] without requests,
+ * so an always-on app doesn't hold it in memory all day. Every call is a stateless one-shot in a
+ * short-lived Conversation; LiteRT-LM applies the Gemma chat template, so prompts are plain text.
+ * One instance is shared app-wide (see AuraApplication).
  */
-class GemmaManager(private val context: Context) {
+class GemmaManager(private val context: Context, private val scope: CoroutineScope) {
 
     private val inferenceMutex = Mutex()
-    private var engine: Engine? = null
+    private var engine: Engine? = null // guarded by inferenceMutex
+    private var unloadJob: Job? = null
 
     private val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
 
@@ -50,6 +71,9 @@ class GemmaManager(private val context: Context) {
     // "GPU" or "CPU" once loaded, so the UI can show what's actually running
     private val _activeBackend = MutableStateFlow<String?>(null)
     val activeBackend: StateFlow<String?> = _activeBackend
+
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError: StateFlow<String?> = _lastError
 
     companion object {
         const val PREF_FILE = "aura_prefs"
@@ -64,7 +88,14 @@ class GemmaManager(private val context: Context) {
 
         // Character budgets for context injected into prompts (~4 chars per token)
         private const val MAX_MEMORY_CONTEXT_CHARS = 6000
-        private const val MAX_EVALUATION_CHARS = 4000
+
+        // Largest transcript sent in one call: ~2,000 tokens, about 10 minutes of speech, leaving
+        // room in MAX_NUM_TOKENS for the instructions and the JSON answer. Longer conversations
+        // are split into chunks of this size by ConversationProcessor.
+        const val MAX_TRANSCRIPT_CHARS = 8000
+
+        // Release the weights after this long without a request
+        private const val IDLE_UNLOAD_MS = 5 * 60_000L
 
         val DEFAULT_SEARCH_PATHS = listOf(
             "/data/local/tmp/llm/$MODEL_FILE_NAME",
@@ -87,34 +118,78 @@ KEY RULES:
         private val PRECISE_SAMPLER = SamplerConfig(topK = 1, topP = 1.0, temperature = 1.0)
     }
 
-    suspend fun initialize(customPath: String? = null) = withContext(Dispatchers.IO) {
+    /** Loads the model now, e.g. after the user picked a file. Throws if it can't be loaded. */
+    suspend fun load(customPath: String? = null) = withContext(Dispatchers.IO) {
         inferenceMutex.withLock {
+            loadLocked(customPath)
+            scheduleUnload()
+        }
+    }
+
+    /** True if a model file can be found without loading it. */
+    fun hasModelFile(): Boolean = resolveModelPath(null) != null
+
+    fun modelFileName(): String? = resolveModelPath(null)?.substringAfterLast('/')
+
+    // Caller must hold inferenceMutex
+    private fun loadLocked(customPath: String?): Engine {
+        try {
+            _state.value = GemmaState.LOADING
+            closeEngine()
+
+            val resolvedPath = resolveModelPath(customPath)
+                ?: throw IllegalStateException(
+                    "Gemma 4 model ($MODEL_FILE_NAME) not found. Choose the model file in Settings."
+                )
+
+            Log.i("GemmaManager", "Loading Gemma 4 E2B from: $resolvedPath")
+            val (loadedEngine, backendName) = createEngine(resolvedPath)
+            engine = loadedEngine
+
+            prefs.edit().putString(PREF_CUSTOM_MODEL_PATH, resolvedPath).apply()
+            _activeModelPath.value = resolvedPath
+            _activeBackend.value = backendName
+            _lastError.value = null
+            _state.value = GemmaState.READY
+            Log.i("GemmaManager", "Gemma 4 E2B ready on $backendName")
+            return loadedEngine
+        } catch (e: Exception) {
+            Log.e("GemmaManager", "Loading failed: ${e.message}")
+            _lastError.value = e.message
+            _state.value = GemmaState.ERROR
+            throw e
+        }
+    }
+
+    /**
+     * Runs [block] with the engine loaded, loading it first if needed, then restarts the idle
+     * unload timer. Calls are serialized.
+     */
+    private suspend fun <T> withEngine(block: (Engine) -> T): T = withContext(Dispatchers.IO) {
+        inferenceMutex.withLock {
+            unloadJob?.cancel()
+            val activeEngine = engine ?: loadLocked(null)
+            _state.value = GemmaState.INFERRING
             try {
-                _state.value = GemmaState.LOADING
-                closeEngine()
-
-                val resolvedPath = resolveModelPath(customPath)
-                if (resolvedPath == null) {
-                    _activeModelPath.value = null
-                    _state.value = GemmaState.ERROR
-                    throw IllegalStateException(
-                        "Gemma 4 model ($MODEL_FILE_NAME) not found. Please tap 'Select Model' to pick your model file."
-                    )
-                }
-
-                Log.i("GemmaManager", "Initializing Gemma 4 E2B from: $resolvedPath")
-                val (loadedEngine, backendName) = createEngine(resolvedPath)
-                engine = loadedEngine
-
-                prefs.edit().putString(PREF_CUSTOM_MODEL_PATH, resolvedPath).apply()
-                _activeModelPath.value = resolvedPath
-                _activeBackend.value = backendName
+                block(activeEngine)
+            } finally {
                 _state.value = GemmaState.READY
-                Log.i("GemmaManager", "Gemma 4 E2B ready on $backendName")
-            } catch (e: Exception) {
-                Log.e("GemmaManager", "Initialization failed: ${e.message}")
-                _state.value = GemmaState.ERROR
-                throw e
+                scheduleUnload()
+            }
+        }
+    }
+
+    // Caller must hold inferenceMutex
+    private fun scheduleUnload() {
+        unloadJob?.cancel()
+        unloadJob = scope.launch {
+            delay(IDLE_UNLOAD_MS)
+            inferenceMutex.withLock {
+                if (engine != null) {
+                    Log.i("GemmaManager", "Idle for ${IDLE_UNLOAD_MS / 60_000} min, releasing model")
+                    closeEngine()
+                    _state.value = GemmaState.NOT_LOADED
+                }
             }
         }
     }
@@ -183,16 +258,15 @@ KEY RULES:
             Log.w("GemmaManager", "Error closing previous engine: ${e.message}")
         }
         engine = null
-        _activeBackend.value = null
     }
 
-    // Runs a single-turn prompt in a fresh conversation. Caller must hold inferenceMutex.
+    // Runs a single-turn prompt in a fresh conversation (called inside withEngine)
     private fun runInference(
+        activeEngine: Engine,
         prompt: String,
         sampler: SamplerConfig,
         systemInstruction: String? = null
     ): String {
-        val activeEngine = engine ?: throw IllegalStateException("Model not loaded")
         val config = ConversationConfig(
             systemInstruction = systemInstruction?.let { Contents.of(it) },
             samplerConfig = sampler
@@ -226,62 +300,121 @@ KEY RULES:
         memoryContext: String = "",
         taskContext: String = "",
         onlineData: String = ""
-    ): String = withContext(Dispatchers.IO) {
-        if (_state.value != GemmaState.READY) {
-            return@withContext "Aura is still loading. Please wait a moment."
-        }
-
-        inferenceMutex.withLock {
-            _state.value = GemmaState.INFERRING
-
-            try {
+    ): String {
+        return try {
+            withEngine { activeEngine ->
                 // Safeguard: clamp context length so the prompt fits the KV-cache
                 val safeMemory = memoryContext.takeLast(MAX_MEMORY_CONTEXT_CHARS)
                 val prompt = buildPrompt(userInput, safeMemory, taskContext, onlineData)
-                val response = runInference(prompt, CHAT_SAMPLER, SYSTEM_PROMPT)
-                _state.value = GemmaState.READY
-                response.ifBlank { "I couldn't process that." }
-            } catch (e: Exception) {
-                Log.e("GemmaManager", "Response inference error: ${e.message}")
-                _state.value = GemmaState.READY
-                "I'm having trouble processing that right now. Please try again."
+                runInference(activeEngine, prompt, CHAT_SAMPLER, SYSTEM_PROMPT)
+                    .ifBlank { "I couldn't process that." }
             }
+        } catch (e: Exception) {
+            Log.e("GemmaManager", "Response inference error: ${e.message}")
+            if (engine == null) "I can't load my language model right now. ${e.message ?: ""}".trim()
+            else "I'm having trouble processing that right now. Please try again."
         }
     }
 
     /**
-     * Filters recorded speech through Gemma:
-     * - Returns null if the text is small talk, filler, or gibberish.
-     * - Returns a 1-sentence summary if it contains important facts, decisions, or commitments.
+     * Summarizes a recorded transcript in one call: title, summary, action items and memories.
+     * Returns null if the model failed (the caller keeps the transcript and can retry).
+     * [part] is "k of n" when the transcript is one chunk of a longer conversation.
      */
-    suspend fun evaluateAndExtract(conversationText: String): String? = withContext(Dispatchers.IO) {
-        if (_state.value != GemmaState.READY || conversationText.isBlank()) return@withContext null
-
-        inferenceMutex.withLock {
-            _state.value = GemmaState.INFERRING
-            try {
-                val safeText = conversationText.takeLast(MAX_EVALUATION_CHARS)
-                val prompt = """You are an intelligent memory filter for a personal AI companion.
-Analyze the following recorded speech:
+    suspend fun analyzeConversation(transcript: String, part: String? = null): ConversationInsights? {
+        val partNote = if (part != null) "\nThis is part $part of a longer conversation.\n" else ""
+        // Tuned against sample transcripts (planning, work, small talk, TV, TV mixed with talk):
+        // the explicit "keep" decision and media examples stop Gemma saving chatter and ads
+        val prompt = """You turn transcripts from an always-on microphone into notes for the person wearing it. The microphone also picks up background chatter, TV, radio, ads and speech recognition errors. Times are local.
+$partNote
+TRANSCRIPT:
 ""${'"'}
-$safeText
+${transcript.take(MAX_TRANSCRIPT_CHARS)}
 ""${'"'}
 
-Determine if this speech contains meaningful information, facts, decisions, commitments, or tasks worth remembering.
-- If it is meaningless filler, small talk, gibberish, or casual noise (e.g., "yeah", "ok", "no", "haha"), reply with ONLY: DISCARD
-- If it contains valuable information or action items, summarize the key takeaway in 1 clear, concise sentence."""
-                val response = runInference(prompt, PRECISE_SAMPLER).ifBlank { "DISCARD" }
-                _state.value = GemmaState.READY
-                if (response.startsWith("DISCARD", ignoreCase = true) || response.length < 5) {
-                    null
-                } else {
-                    response
+First decide which lines are people in the room talking to each other. Ignore lines that sound like TV, radio, podcasts, ads or a presenter speaking to an audience (for example "welcome back to the show", "stay tuned", recipe steps, offers).
+
+Reply with ONLY a JSON object with these keys, in this order:
+"keep": true only if people in the room discussed plans, decisions, commitments or facts worth knowing later. false for greetings, small talk (weather, offering coffee or food, "how are you"), filler or media
+"title": 3 to 7 word title of what the people discussed ("" if keep is false)
+"summary": 1 to 3 sentences with the main points, decisions and plans ("" if keep is false)
+"action_items": things a person in the room committed to or was asked to do, as {"task": "...", "due": "..."}. "task" starts with a verb, max 8 words. "due" is the deadline as said, or ""
+"memories": up to 5 facts that will still matter next week and are not already action items: names, relationships, dates, numbers, places, preferences, decisions. Each is a standalone sentence. Never describe the conversation itself.
+
+Use [] for empty lists. Only use information stated in the transcript; copy numbers exactly."""
+
+        return try {
+            val response = withEngine { runInference(it, prompt, PRECISE_SAMPLER) }
+            parseInsights(response)
+        } catch (e: Exception) {
+            Log.e("GemmaManager", "Conversation analysis error: ${e.message}")
+            null
+        }
+    }
+
+    /** Combines the per-chunk summaries of a long conversation into one title and summary. */
+    suspend fun mergeSummaries(parts: List<ConversationInsights>): Pair<String, String>? {
+        val listing = parts.filter { !it.isEmpty }.mapIndexed { i, p ->
+            "Part ${i + 1}: ${p.title}. ${p.summary}"
+        }.joinToString("\n")
+        if (listing.isBlank()) return null
+        val prompt = """These are summaries of consecutive parts of one long conversation:
+$listing
+
+Reply with ONLY a JSON object: {"title": "3 to 7 word title for the whole conversation", "summary": "2 to 4 sentences covering the whole conversation"}"""
+        return try {
+            val response = withEngine { runInference(it, prompt, PRECISE_SAMPLER) }
+            val json = extractJson(response) ?: return null
+            Pair(json.optString("title").trim(), json.optString("summary").trim())
+        } catch (e: Exception) {
+            Log.e("GemmaManager", "Summary merge error: ${e.message}")
+            null
+        }
+    }
+
+    private fun parseInsights(response: String): ConversationInsights? {
+        val json = extractJson(response) ?: return null
+        // Gemma still fills in the other fields for chatter; the keep decision is more reliable
+        if (!json.optBoolean("keep", true)) return ConversationInsights("", "", emptyList(), emptyList())
+        val actions = mutableListOf<Pair<String, String>>()
+        json.optJSONArray("action_items")?.let { items ->
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i)
+                val task = (item?.optString("task") ?: items.optString(i)).trim()
+                val due = item?.optString("due")?.trim().orEmpty()
+                if (task.isNotBlank() && task.length <= 100) {
+                    actions.add(Pair(task, if (due.equals("none", ignoreCase = true)) "" else due))
                 }
-            } catch (e: Exception) {
-                Log.e("GemmaManager", "Memory evaluation error: ${e.message}")
-                _state.value = GemmaState.READY
-                null
             }
+        }
+        val memories = mutableListOf<String>()
+        json.optJSONArray("memories")?.let { items ->
+            for (i in 0 until items.length()) {
+                val memory = items.optString(i).trim()
+                if (memory.length >= 5) memories.add(memory)
+            }
+        }
+        return ConversationInsights(
+            title = json.optString("title").trim(),
+            summary = json.optString("summary").trim(),
+            actionItems = actions,
+            memories = memories.take(5)
+        )
+    }
+
+    // Gemma sometimes wraps JSON in ```json fences or adds a sentence around it
+    private fun extractJson(response: String): JSONObject? {
+        val start = response.indexOf('{')
+        val end = response.lastIndexOf('}')
+        if (start < 0 || end <= start) {
+            Log.w("GemmaManager", "No JSON in model output: ${response.take(200)}")
+            return null
+        }
+        return try {
+            JSONObject(response.substring(start, end + 1))
+        } catch (e: Exception) {
+            Log.w("GemmaManager", "Unparseable model output: ${response.take(200)}")
+            null
         }
     }
 
@@ -289,16 +422,12 @@ Determine if this speech contains meaningful information, facts, decisions, comm
      * Extracts all actionable tasks and deadlines from spoken text into clean titles and deadlines.
      * Uses on-device Gemma when ready, with high-precision pattern extraction as fallback.
      */
-    suspend fun extractAllTasks(rawText: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+    suspend fun extractAllTasks(rawText: String): List<Pair<String, String>> {
         val fallbackTasks = fallbackMultiTaskExtraction(rawText)
+        if (rawText.isBlank()) return fallbackTasks
 
-        if (_state.value != GemmaState.READY || rawText.isBlank()) {
-            return@withContext fallbackTasks
-        }
-
-        inferenceMutex.withLock {
-            _state.value = GemmaState.INFERRING
-            try {
+        return try {
+            withEngine { activeEngine ->
                 val prompt = """Extract all actionable tasks and commitments from this spoken text into concise task titles (max 6 words, starting with an imperative verb) and any mentioned deadline.
 Speech: "$rawText"
 
@@ -306,8 +435,7 @@ If tasks are found, output each task on a new line EXACTLY like this:
 TASK: [short action item] | TIME: [deadline if mentioned, otherwise None]
 
 If no actionable tasks are found, output: NONE"""
-                val response = runInference(prompt, PRECISE_SAMPLER)
-                _state.value = GemmaState.READY
+                val response = runInference(activeEngine, prompt, PRECISE_SAMPLER)
 
                 val gemmaTasks = mutableListOf<Pair<String, String>>()
                 val lines = response.lines()
@@ -332,16 +460,11 @@ If no actionable tasks are found, output: NONE"""
                 } else {
                     gemmaTasks
                 }
-            } catch (e: Exception) {
-                Log.e("GemmaManager", "Task extraction inference error: ${e.message}")
-                _state.value = GemmaState.READY
-                fallbackTasks
             }
+        } catch (e: Exception) {
+            Log.e("GemmaManager", "Task extraction inference error: ${e.message}")
+            fallbackTasks
         }
-    }
-
-    suspend fun extractCleanTask(rawText: String): Pair<String, String> {
-        return extractAllTasks(rawText).firstOrNull() ?: Pair("New Task", "")
     }
 
     fun fallbackMultiTaskExtraction(text: String): List<Pair<String, String>> {
@@ -403,56 +526,6 @@ If no actionable tasks are found, output: NONE"""
         return tasks
     }
 
-    /**
-     * Contextually corrects speech-to-text transcription errors (e.g. phonetic errors,
-     * distant microphone acoustic mishearings, domain terms like 'date and friendship' -> 'data pipeline').
-     * If text already makes good sense, returns original or lightly cleaned text.
-     */
-    suspend fun correctAndInterpretSpeech(rawText: String): String = withContext(Dispatchers.IO) {
-        if (_state.value != GemmaState.READY || rawText.isBlank() || rawText.length < 5) {
-            return@withContext rawText
-        }
-
-        inferenceMutex.withLock {
-            _state.value = GemmaState.INFERRING
-            try {
-                val prompt = """You are an intelligent ambient speech corrector. Spoken English was recorded by a phone microphone across the room and transcribed by an offline speech recognizer. It may contain phonetic errors, homophones, or misheard technical/domain words (e.g., "date and friendship" -> "data pipeline", "iceberk" -> "iceberg", "caugh car" -> "kafka").
-
-Tasks:
-1. Fix obvious speech recognition mistakes into sensible, coherent natural English based on context.
-2. Keep the exact meaning and original words where they make sense. Do NOT add new facts or summarize.
-3. If the transcription already makes good sense, keep it as is.
-4. Output ONLY the cleaned transcript with no preamble or explanation.
-
-Raw speech: "$rawText"
-Cleaned text:"""
-                val response = runInference(prompt, PRECISE_SAMPLER)
-                _state.value = GemmaState.READY
-
-                if (response.isNotBlank() &&
-                    !response.contains("sorry", ignoreCase = true) &&
-                    !response.startsWith("I cannot", ignoreCase = true) &&
-                    response.length in (rawText.length / 2)..(rawText.length * 2 + 50)
-                ) {
-                    val cleaned = response
-                        .replace(Regex("^(?i)(Cleaned text:?|Here is the cleaned text:?|Corrected:?)\\s*"), "")
-                        .removeSurrounding("\"")
-                        .removeSurrounding("'")
-                        .trim()
-                    if (cleaned.isNotBlank()) cleaned else rawText
-                } else {
-                    rawText
-                }
-            } catch (e: Exception) {
-                Log.e("GemmaManager", "Speech correction error: ${e.message}")
-                _state.value = GemmaState.READY
-                rawText
-            }
-        }
-    }
-
-
-
     private fun buildPrompt(
         userInput: String,
         memoryContext: String,
@@ -462,7 +535,7 @@ Cleaned text:"""
         val sb = StringBuilder()
 
         if (memoryContext.isNotBlank()) {
-            sb.append("RECORDED CONVERSATION HISTORY:\n$memoryContext\n\n")
+            sb.append("CONTEXT FROM THE USER'S RECORDINGS:\n$memoryContext\n\n")
         }
 
         if (taskContext.isNotBlank()) {
@@ -478,11 +551,4 @@ Cleaned text:"""
         return sb.toString()
     }
 
-    fun isReady() = _state.value == GemmaState.READY
-
-    fun destroy() {
-        closeEngine()
-        _activeModelPath.value = null
-        _state.value = GemmaState.NOT_LOADED
-    }
 }

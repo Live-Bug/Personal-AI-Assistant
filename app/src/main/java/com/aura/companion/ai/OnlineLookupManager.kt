@@ -3,6 +3,8 @@ package com.aura.companion.ai
 import com.aura.companion.BuildConfig
 import com.aura.companion.data.api.ApiClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 
 // Represents a log entry for transparency dashboard
@@ -14,9 +16,22 @@ data class NetworkCallLog(
     val dataReturned: String
 )
 
+/**
+ * The only code that talks to the network: real-time factual lookups (weather, news).
+ * Every call is logged for the Settings screen; conversations and reasoning never go online.
+ */
 class OnlineLookupManager {
 
-    val callLogs = mutableListOf<NetworkCallLog>()
+    private val _callLogs = MutableStateFlow<List<NetworkCallLog>>(emptyList())
+    val callLogs: StateFlow<List<NetworkCallLog>> = _callLogs
+
+    // True while a request is in flight, for the "online" indicator
+    private val _active = MutableStateFlow(false)
+    val active: StateFlow<Boolean> = _active
+
+    private fun log(entry: NetworkCallLog) {
+        _callLogs.value = _callLogs.value + entry
+    }
 
     // Detects if user query needs real-time data
     fun needsOnlineData(query: String): OnlineQueryType {
@@ -75,6 +90,7 @@ class OnlineLookupManager {
     suspend fun fetchWeather(city: String = BuildConfig.DEFAULT_CITY): String =
         withContext(Dispatchers.IO) {
             val targetCity = if (city.isBlank()) BuildConfig.DEFAULT_CITY else city.trim()
+            _active.value = true
             try {
                 val response = ApiClient.weatherApi.getCurrentWeather(
                     city = targetCity,
@@ -85,12 +101,14 @@ class OnlineLookupManager {
                     "feels like ${response.main.feels_like}°C, $desc. " +
                     "Humidity: ${response.main.humidity}%, Wind: ${response.wind.speed} m/s."
 
-                callLogs.add(NetworkCallLog(type = "WEATHER", query = targetCity, success = true, dataReturned = result))
+                log(NetworkCallLog(type = "WEATHER", query = targetCity, success = true, dataReturned = result))
                 result
             } catch (e: Exception) {
                 val error = "Weather data unavailable for '$targetCity'."
-                callLogs.add(NetworkCallLog(type = "WEATHER", query = targetCity, success = false, dataReturned = error))
+                log(NetworkCallLog(type = "WEATHER", query = targetCity, success = false, dataReturned = error))
                 error
+            } finally {
+                _active.value = false
             }
         }
 
@@ -101,16 +119,18 @@ class OnlineLookupManager {
                 // For hackathon, we use a placeholder or free tier
                 val headlines = "Top news: Unable to fetch without a NewsAPI key. " +
                     "Please add NEWS_API_KEY in BuildConfig for live headlines."
-                callLogs.add(NetworkCallLog(type = "NEWS", query = country, success = true, dataReturned = headlines))
+                log(NetworkCallLog(type = "NEWS", query = country, success = true, dataReturned = headlines))
                 headlines
             } catch (e: Exception) {
                 val error = "News unavailable right now."
-                callLogs.add(NetworkCallLog(type = "NEWS", query = country, success = false, dataReturned = error))
+                log(NetworkCallLog(type = "NEWS", query = country, success = false, dataReturned = error))
                 error
             }
         }
 
-    fun clearLogs() = callLogs.clear()
+    fun clearLogs() {
+        _callLogs.value = emptyList()
+    }
 }
 
 enum class OnlineQueryType {

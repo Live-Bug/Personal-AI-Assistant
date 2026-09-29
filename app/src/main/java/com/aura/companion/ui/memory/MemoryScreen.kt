@@ -1,170 +1,137 @@
 package com.aura.companion.ui.memory
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.aura.companion.data.db.Memory
-import com.aura.companion.ui.theme.*
+import com.aura.companion.data.db.MemorySource
+import com.aura.companion.ui.components.EmptyState
+import com.aura.companion.ui.components.ScreenHeader
+import com.aura.companion.ui.components.formatTime
 import com.aura.companion.viewmodel.AuraViewModel
-import java.text.SimpleDateFormat
-import java.util.*
 
 @Composable
 fun MemoryScreen(viewModel: AuraViewModel) {
     val memories by viewModel.memories.collectAsState(initial = emptyList())
-    var showClearDialog by remember { mutableStateOf(false) }
+    val query by viewModel.memoryQuery.collectAsState()
+    var confirmClear by rememberSaveable { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(DarkBackground)
-            .padding(16.dp)
-    ) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("Memories", style = MaterialTheme.typography.headlineMedium, color = Purple80)
-                Text("Your second brain", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    color = Purple30.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("${memories.size} stored",
-                        style = MaterialTheme.typography.labelSmall, color = Purple80,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                IconButton(onClick = { showClearDialog = true }) {
-                    Icon(Icons.Filled.DeleteSweep, "Clear all", tint = MutedRed.copy(alpha = 0.7f))
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader(title = "Memories", subtitle = "Facts Aura keeps, stored only on this phone") {
+            if (memories.isNotEmpty() && query.isBlank()) {
+                IconButton(onClick = { confirmClear = true }) {
+                    Icon(Icons.Outlined.DeleteSweep, contentDescription = "Delete all memories")
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Privacy banner
-        Surface(
-            color = ListeningGreen.copy(alpha = 0.08f),
-            shape = RoundedCornerShape(10.dp)
-        ) {
-            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Lock, contentDescription = null,
-                    tint = ListeningGreen, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("All memories stored locally on your device. Nothing is uploaded.",
-                    style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = viewModel::setMemoryQuery,
+            placeholder = { Text("Search memories") },
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { viewModel.setMemoryQuery("") }) {
+                        Icon(Icons.Outlined.Close, contentDescription = "Clear search")
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(28.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+        )
 
         if (memories.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.Psychology, contentDescription = null,
-                        tint = TextSecondary.copy(alpha = 0.3f), modifier = Modifier.size(56.dp))
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("No memories yet", style = MaterialTheme.typography.titleMedium, color = TextSecondary)
-                    Text("Start talking and Aura will remember everything.",
-                        style = MaterialTheme.typography.bodyMedium, color = TextSecondary.copy(alpha = 0.6f))
-                }
+            if (query.isBlank()) {
+                EmptyState(
+                    icon = Icons.Outlined.Psychology,
+                    title = "No memories yet",
+                    body = "Aura picks out facts worth keeping from your conversations. Tap the mic and say " +
+                        "\"remember my passport expires in March\" to add one, or ask a question to search."
+                )
+            } else {
+                EmptyState(icon = Icons.Outlined.Search, title = "No matches", body = "Try a different word.")
             }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(memories, key = { it.id }) { memory ->
-                    MemoryCard(memory = memory, onDelete = { viewModel.deleteMemory(memory.id) })
-                }
+            return@Column
+        }
+
+        LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
+            items(memories, key = { it.id }) { memory ->
+                MemoryRow(memory, onDelete = { viewModel.deleteMemory(memory.id) })
             }
         }
     }
 
-    if (showClearDialog) {
+    if (confirmClear) {
         AlertDialog(
-            onDismissRequest = { showClearDialog = false },
-            containerColor = DarkSurface,
-            title = { Text("Clear All Memories?", color = TextPrimary) },
-            text = { Text("This permanently deletes all conversation history from your device.", color = TextSecondary) },
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Delete all memories?") },
+            text = { Text("This permanently removes every memory from this phone. Conversations and tasks are kept.") },
             confirmButton = {
-                TextButton(onClick = { viewModel.clearAllMemory(); showClearDialog = false }) {
-                    Text("Clear", color = MutedRed)
+                TextButton(onClick = { viewModel.clearAllMemory(); confirmClear = false }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { showClearDialog = false }) { Text("Cancel", color = TextSecondary) }
-            }
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } }
         )
     }
 }
 
 @Composable
-fun MemoryCard(memory: Memory, onDelete: () -> Unit) {
-    val dateFormat = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault())
-    val date = dateFormat.format(Date(memory.timestamp))
-
-    val categoryColor = when (memory.category) {
-        "summary" -> Cyan80
-        "task" -> ListeningGreen
-        "weather" -> OnlineBlue
-        "query" -> Purple80
-        else -> TextSecondary
-    }
-
-    Surface(color = DarkSurface, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(color = categoryColor.copy(alpha = 0.15f), shape = RoundedCornerShape(6.dp)) {
-                        Text(memory.category.uppercase(),
-                            style = MaterialTheme.typography.labelSmall, color = categoryColor,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(date, style = MaterialTheme.typography.labelSmall, color = TextSecondary.copy(alpha = 0.6f))
+private fun MemoryRow(memory: Memory, onDelete: () -> Unit) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(memory.content, style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(4.dp))
+                val source = when (memory.source) {
+                    MemorySource.CONVERSATION -> "From a conversation"
+                    MemorySource.USER -> "You asked me to remember"
                 }
-                IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Filled.Close, contentDescription = "Delete",
-                        tint = TextSecondary.copy(alpha = 0.4f), modifier = Modifier.size(14.dp))
-                }
+                Text(
+                    "${formatTime(memory.timestamp)} · $source",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // User input (what was said)
-            Text(memory.userInput, style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary.copy(alpha = 0.7f), maxLines = 3)
-
-            Spacer(modifier = Modifier.height(8.dp))
-            HorizontalDivider(color = DarkSurfaceVariant)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // AI summary/response
-            Row {
-                Icon(Icons.Filled.AutoAwesome, contentDescription = null,
-                    tint = Purple80, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(memory.aiResponse, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Outlined.Close, contentDescription = "Delete memory", tint = MaterialTheme.colorScheme.outline)
             }
         }
+        HorizontalDivider(Modifier.padding(start = 20.dp), color = MaterialTheme.colorScheme.surfaceVariant)
     }
 }

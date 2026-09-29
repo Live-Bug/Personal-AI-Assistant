@@ -6,15 +6,19 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [Memory::class, Task::class, ConversationSegment::class],
-    version = 2,
+    entities = [
+        Conversation::class, ConversationFts::class, ConversationSegment::class,
+        Memory::class, MemoryFts::class, Task::class
+    ],
+    version = 3,
     exportSchema = false
 )
 abstract class AuraDatabase : RoomDatabase() {
 
+    abstract fun conversationDao(): ConversationDao
+    abstract fun conversationSegmentDao(): ConversationSegmentDao
     abstract fun memoryDao(): MemoryDao
     abstract fun taskDao(): TaskDao
-    abstract fun conversationSegmentDao(): ConversationSegmentDao
 
     companion object {
         @Volatile
@@ -27,7 +31,8 @@ abstract class AuraDatabase : RoomDatabase() {
                     AuraDatabase::class.java,
                     "aura_database"
                 )
-                    .fallbackToDestructiveMigration()
+                    // Prototype: schema changes wipe local data instead of migrating it
+                    .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                 INSTANCE = instance
                 instance
