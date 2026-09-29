@@ -1,0 +1,39 @@
+1. Description
+Build a personal AI companion — in a form factor of the team's own choosing (wearable, desk companion, or otherwise) — that is continuously listening/sensing its environment and helps amplify human potential. The AI's reasoning must run entirely on-device; the only permitted online calls are for real-time factual lookups (weather, search, news), never for reasoning or decision-making. Teams choose their own focus area — memory & recall, productivity & task management, learning & skill-building, decision-support/wellbeing, or a combination — and are encouraged to work within a constrained compute budget (edge device like Raspberry Pi preferred, phone-class app next, local-network laptop least preferred).
+
+1. Business Context
+What is the exact need?
+* A genuinely private, always-available personal AI that doesn't depend on a cloud connection or subscription to function — addressing a real, current market gap.
+What is driving this in 2026?
+* The AI-wearable category has publicly struggled precisely on this point: cloud-dependent devices like the Humane AI Pin and the original Rabbit R1 either shut down entirely or underdelivered when their backend services changed or were discontinued, while pendants that "always listen" (Limitless, Bee, Omi) have raised ongoing privacy and consent debates. There is a clear, current opening for a device that keeps reasoning local by design rather than as an afterthought — immune to service shutdowns, acquisitions, or connectivity loss, and inherently more private.
+* Simultaneously, small/edge-optimized language models and local inference tooling (quantized SLMs, efficient runtimes) have matured enough in 2025–2026 that meaningfully capable offline reasoning on constrained hardware is now realistic, not aspirational.
+What is the value that the problem will bring to Infosys?
+* Builds an internal capability in edge-AI/on-device inference, small-model optimization, and privacy-first personal-AI design
+* Creates reusable IP, accelerators, and reference architecture for offline and sovereign AI solutions.
+* Strengthens Infosys capabilities in Physical AI, SLM optimization, and cost-efficient AI deployment.
+* Supports client opportunities requiring data sovereignty, low latency, and offline reliability.
+* Provides a foundation for future wearable AI, intelligent assistants, and edge-AI offering
+
+1. Key Stakeholders
+
+1. Solution Features 
+	1. Deliverables
+* A working physical prototype (any form factor) with continuous local sensing.
+* An on-device reasoning pipeline (local LLM/SLM) capable of supporting at least one human-potential use case end-to-end.
+* Demonstrated, working privacy safeguards (see Must Have).
+* A clear demo showing the strict online/offline boundary in action (i.e., an online lookup happening alongside fully local reasoning).
+	1. Must Have
+•  Continuous local audio/environment sensing. This means the device should be able to listen and respond with a wake word
+* All AI reasoning and decision-making performed on-device — no cloud LLM calls; online calls limited strictly to real-time factual lookups (weather, search, news).
+* A physical mute switch and a visible listening indicator (light).
+* Raw audio never leaves the device — no cloud sync of recordings.
+* A working demo in at least one chosen human-potential domain (memory/recall, productivity, learning, decision-support/wellbeing). 
+	1. Good to Have
+* Support for multiple human-potential domains in a single device.
+* Long battery life / power-efficient design appropriate to the chosen form factor.
+* Thoughtful, ergonomic, or genuinely wearable/desk-friendly.
+* Graceful degradation or honest fallback behavior when a query exceeds the on-device model's capability (rather than failing silently or hallucinating).
+	1. Existing Solutions/Products
+* Limitless Pendant — a leading always-listening pendant for conversation capture and summarization; cloud-dependent, and the product was pulled from sale to new customers after Meta's acquisition in December 2025 — a useful cautionary example of what full cloud dependency risks.
+* OpenClaw — an open-source, self-hosted personal AI agent framework with an extensible plugin ecosystem (ClawHub); it can be configured to run entirely on a local LLM (via Ollama or LM Studio) instead of a cloud provider, giving it "no data leaves the machine" privacy properties. It's a software analog of the local-reasoning-first architecture this problem asks for, though it's typically deployed on a home server or mini-PC rather than wearable hardware — a useful reference for the on-device agent/tool-use pattern, not the form factor.
+Omi (formerly Friend, by Based Hardware) — an open-source AI wearable pendant that explicitly markets local processing and user data ownership as differentiators, and is the closest existing hardware comparable to what this problem asks teams to build, though it still commonly relies on cloud AI for its more advanced features.

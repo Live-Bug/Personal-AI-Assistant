@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kotlin.kapt)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -18,6 +18,11 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // LiteRT-LM only ships native libraries for these ABIs
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
 
         // Load secrets securely from local.properties (which is git-ignored)
         val localProperties = Properties().apply {
@@ -48,19 +53,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
     }
 
     // Allow large model files
-    aaptOptions {
-        noCompress += "task"
-        noCompress += "bin"
+    androidResources {
+        noCompress += "litertlm"
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -82,7 +88,7 @@ dependencies {
     // Room DB
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
-    kapt(libs.androidx.room.compiler)
+    ksp(libs.androidx.room.compiler)
 
     // Networking
     implementation(libs.retrofit)
@@ -94,8 +100,8 @@ dependencies {
     // Coroutines
     implementation(libs.coroutines.android)
 
-    // MediaPipe LLM (on-device Gemma)
-    implementation(libs.mediapipe.tasks.genai)
+    // LiteRT-LM (on-device Gemma 4, GPU via OpenCL)
+    implementation(libs.litertlm.android)
 
     debugImplementation(libs.androidx.ui.tooling)
 }

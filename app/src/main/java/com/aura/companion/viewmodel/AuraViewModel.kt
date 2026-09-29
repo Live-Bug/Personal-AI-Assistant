@@ -54,6 +54,7 @@ data class AuraUiState(
     val isModelReady: Boolean = false,
     val modelError: String = "",
     val activeModelPath: String = "",
+    val activeBackend: String = "",             // "GPU" or "CPU" once the model is loaded
     val partialSpeech: String = "",
     val statusText: String = "Initializing Aura...",
     val onlineCallActive: Boolean = false,
@@ -146,6 +147,11 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.value = _uiState.value.copy(activeModelPath = path ?: "")
             }
         }
+        viewModelScope.launch {
+            gemmaManager.activeBackend.collect { backend ->
+                _uiState.value = _uiState.value.copy(activeBackend = backend ?: "")
+            }
+        }
 
         // Load Gemma model on startup
         loadModel()
@@ -164,15 +170,17 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                     statusText = if (customPath != null) "Loading selected model..." else "Loading AI model... (may take 30 seconds)"
                 )
                 gemmaManager.initialize(customPath)
-                val fileName = gemmaManager.activeModelPath.value?.substringAfterLast('/') ?: "Gemma 2B"
+                val fileName = gemmaManager.activeModelPath.value?.substringAfterLast('/') ?: "Gemma 4 E2B"
+                val backend = gemmaManager.activeBackend.value ?: "CPU"
                 _uiState.value = _uiState.value.copy(
                     isModelLoading = false,
                     isModelReady = true,
                     modelError = "",
-                    statusText = "Aura is ready ($fileName). Tap 'Listen' to start."
+                    activeBackend = backend, // set here too: this copy() can race the collector above
+                    statusText = "Aura is ready ($fileName on $backend). Tap 'Listen' to start."
                 )
                 addTranscriptEntry(TranscriptEntry(
-                    text = "Aura is ready with model: $fileName. Tap 'Listen' when you want me to record and summarize your conversation.",
+                    text = "Aura is ready with model: $fileName ($backend). Tap 'Listen' when you want me to record and summarize your conversation.",
                     type = TranscriptType.SYSTEM_MESSAGE
                 ))
             } catch (e: Exception) {
@@ -312,7 +320,7 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
 
         Log.d("AuraViewModel", "Finalizing speech block ($reason): ${fullText.take(60)}...")
 
-        // 1. Contextual interpretation with Gemma 2B (fixes phonetic STT acoustic mishearings)
+        // 1. Contextual interpretation with Gemma (fixes phonetic STT acoustic mishearings)
         val correctedText = if (gemmaManager.isReady()) {
             gemmaManager.correctAndInterpretSpeech(fullText)
         } else {

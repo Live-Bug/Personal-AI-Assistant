@@ -3,7 +3,17 @@ package com.aura.companion.ai
 import android.content.Context
 import android.os.Environment
 import android.util.Log
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import com.aura.companion.BuildConfig
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,10 +27,17 @@ enum class GemmaState {
     NOT_LOADED, LOADING, READY, INFERRING, ERROR
 }
 
+/**
+ * On-device Gemma 4 E2B running through LiteRT-LM.
+ *
+ * One [Engine] holds the model weights for the app's lifetime. Every call below is a
+ * stateless one-shot, so each opens a short-lived Conversation and closes it afterwards;
+ * LiteRT-LM applies the Gemma chat template itself, so prompts are plain text.
+ */
 class GemmaManager(private val context: Context) {
 
     private val inferenceMutex = Mutex()
-    private var llmInference: LlmInference? = null
+    private var engine: Engine? = null
 
     private val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
 
@@ -30,22 +47,32 @@ class GemmaManager(private val context: Context) {
     private val _activeModelPath = MutableStateFlow<String?>(null)
     val activeModelPath: StateFlow<String?> = _activeModelPath
 
-    // Model paths & constants
+    // "GPU" or "CPU" once loaded, so the UI can show what's actually running
+    private val _activeBackend = MutableStateFlow<String?>(null)
+    val activeBackend: StateFlow<String?> = _activeBackend
+
     companion object {
         const val PREF_FILE = "aura_prefs"
         const val PREF_CUSTOM_MODEL_PATH = "custom_model_path"
 
+        const val MODEL_FILE_NAME = "gemma-4-E2B-it.litertlm"
+        const val MODEL_EXTENSION = ".litertlm"
+
+        // KV-cache size (input + output tokens). Gemma 4 E2B supports up to 32K, but 4K keeps
+        // GPU memory comfortable on 8 GB devices and is plenty for these prompts.
+        private const val MAX_NUM_TOKENS = 4096
+
+        // Character budgets for context injected into prompts (~4 chars per token)
+        private const val MAX_MEMORY_CONTEXT_CHARS = 6000
+        private const val MAX_EVALUATION_CHARS = 4000
+
         val DEFAULT_SEARCH_PATHS = listOf(
-            "/data/local/tmp/llm/gemma-2b-it-cpu-int4.bin",
-            "/storage/emulated/0/Download/gemma-2b-it-cpu-int4.bin",
-            "/sdcard/Download/gemma-2b-it-cpu-int4.bin",
-            "/data/local/tmp/llm/gemma-2b-it-gpu-int4.bin",
-            "/storage/emulated/0/Download/gemma-2b-it-gpu-int4.bin",
-            "/sdcard/Download/gemma-2b-it-gpu-int4.bin"
+            "/data/local/tmp/llm/$MODEL_FILE_NAME",
+            "/storage/emulated/0/Download/$MODEL_FILE_NAME",
+            "/sdcard/Download/$MODEL_FILE_NAME"
         )
 
-        // System prompt that defines Aura's personality
-        private const val SYSTEM_PROMPT = """You are Aura, a helpful and private personal AI companion running entirely on-device. 
+        private const val SYSTEM_PROMPT = """You are Aura, a helpful and private personal AI companion running entirely on-device.
 You help with memory recall and productivity tasks. You are concise, warm, and honest.
 
 KEY RULES:
@@ -53,68 +80,144 @@ KEY RULES:
 - If you don't know something or are unsure, say "I'm not certain about that, but here's what I can share..."
 - Never pretend to have real-time information unless it's provided in the context
 - For tasks, extract actionable items clearly
-- For memory queries, be specific about what you recall from the conversation history provided
+- For memory queries, be specific about what you recall from the conversation history provided"""
 
-"""
+        // Conversational answers get some variety; extraction/correction uses greedy decoding (topK = 1)
+        private val CHAT_SAMPLER = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7)
+        private val PRECISE_SAMPLER = SamplerConfig(topK = 1, topP = 1.0, temperature = 1.0)
     }
 
     suspend fun initialize(customPath: String? = null) = withContext(Dispatchers.IO) {
         inferenceMutex.withLock {
             try {
                 _state.value = GemmaState.LOADING
+                closeEngine()
 
-                // Close any previous instance cleanly before re-initializing
-                try {
-                    llmInference?.close()
-                } catch (e: Exception) {
-                    Log.w("GemmaManager", "Error closing previous instance: ${e.message}")
-                }
-                llmInference = null
-
-                // Resolve model path: custom argument -> SharedPreferences -> default candidates
-                val resolvedPath: String? = when {
-                    !customPath.isNullOrBlank() && File(customPath).exists() -> customPath
-                    else -> {
-                        val savedPath = prefs.getString(PREF_CUSTOM_MODEL_PATH, null)
-                        if (!savedPath.isNullOrBlank() && File(savedPath).exists()) {
-                            savedPath
-                        } else {
-                            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                            val dynamicPaths = listOf(
-                                File(downloadDir, "gemma-2b-it-cpu-int4.bin").absolutePath,
-                                File(downloadDir, "gemma-2b-it-gpu-int4.bin").absolutePath
-                            )
-                            (DEFAULT_SEARCH_PATHS + dynamicPaths).firstOrNull { File(it).exists() }
-                        }
-                    }
-                }
-
+                val resolvedPath = resolveModelPath(customPath)
                 if (resolvedPath == null) {
                     _activeModelPath.value = null
                     _state.value = GemmaState.ERROR
-                    throw IllegalStateException("Gemma model (.bin) not found. Please tap 'Select Model' to pick your model file.")
+                    throw IllegalStateException(
+                        "Gemma 4 model ($MODEL_FILE_NAME) not found. Please tap 'Select Model' to pick your model file."
+                    )
                 }
 
-                Log.i("GemmaManager", "Initializing Gemma 2B from: $resolvedPath")
+                Log.i("GemmaManager", "Initializing Gemma 4 E2B from: $resolvedPath")
+                val (loadedEngine, backendName) = createEngine(resolvedPath)
+                engine = loadedEngine
 
-                val options = LlmInference.LlmInferenceOptions.builder()
-                    .setModelPath(resolvedPath)
-                    .setMaxTokens(512)
-                    .setPreferredBackend(LlmInference.Backend.CPU)
-                    .build()
-
-                llmInference = LlmInference.createFromOptions(context, options)
-
-                // Persist the verified path
                 prefs.edit().putString(PREF_CUSTOM_MODEL_PATH, resolvedPath).apply()
                 _activeModelPath.value = resolvedPath
+                _activeBackend.value = backendName
                 _state.value = GemmaState.READY
-                Log.i("GemmaManager", "Gemma successfully initialized and ready")
+                Log.i("GemmaManager", "Gemma 4 E2B ready on $backendName")
             } catch (e: Exception) {
                 Log.e("GemmaManager", "Initialization failed: ${e.message}")
                 _state.value = GemmaState.ERROR
                 throw e
             }
+        }
+    }
+
+    // Custom argument -> SharedPreferences -> default candidates. Only .litertlm files qualify,
+    // so a stale MediaPipe .bin path saved by an older build is ignored.
+    private fun resolveModelPath(customPath: String?): String? {
+        fun usable(path: String?) =
+            !path.isNullOrBlank() && path.endsWith(MODEL_EXTENSION, ignoreCase = true) && File(path).exists()
+
+        if (usable(customPath)) return customPath
+        val savedPath = prefs.getString(PREF_CUSTOM_MODEL_PATH, null)
+        if (usable(savedPath)) return savedPath
+
+        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val dynamicPath = File(downloadDir, MODEL_FILE_NAME).absolutePath
+        return (DEFAULT_SEARCH_PATHS + dynamicPath).firstOrNull { usable(it) }
+    }
+
+    // GPU first; fall back to CPU on devices without a usable OpenCL driver
+    private fun createEngine(modelPath: String): Pair<Engine, String> {
+        try {
+            return Pair(buildEngineWithSpeculativeDecoding(modelPath, Backend.GPU()), "GPU")
+        } catch (e: Exception) {
+            Log.w("GemmaManager", "GPU backend unavailable, falling back to CPU: ${e.message}")
+        }
+        return Pair(buildEngineWithSpeculativeDecoding(modelPath, Backend.CPU()), "CPU")
+    }
+
+    // Speculative decoding uses the model's bundled Multi-Token Prediction drafter (~1.3-1.8x faster
+    // decode). Model files downloaded before May 2026 lack the drafter, so retry without it on failure.
+    @OptIn(ExperimentalApi::class)
+    private fun buildEngineWithSpeculativeDecoding(modelPath: String, backend: Backend): Engine {
+        ExperimentalFlags.enableBenchmark = BuildConfig.DEBUG // per-call tokens/sec in logcat
+        ExperimentalFlags.enableSpeculativeDecoding = true
+        try {
+            return buildEngine(modelPath, backend)
+        } catch (e: Exception) {
+            Log.w("GemmaManager", "Speculative decoding unavailable, retrying without it: ${e.message}")
+        }
+        ExperimentalFlags.enableSpeculativeDecoding = false
+        return buildEngine(modelPath, backend)
+    }
+
+    private fun buildEngine(modelPath: String, backend: Backend): Engine {
+        val config = EngineConfig(
+            modelPath = modelPath,
+            backend = backend,
+            maxNumTokens = MAX_NUM_TOKENS,
+            cacheDir = context.cacheDir.path
+        )
+        val newEngine = Engine(config)
+        try {
+            newEngine.initialize() // Slow (several seconds); always called on Dispatchers.IO
+        } catch (e: Exception) {
+            newEngine.close()
+            throw e
+        }
+        return newEngine
+    }
+
+    private fun closeEngine() {
+        try {
+            engine?.close()
+        } catch (e: Exception) {
+            Log.w("GemmaManager", "Error closing previous engine: ${e.message}")
+        }
+        engine = null
+        _activeBackend.value = null
+    }
+
+    // Runs a single-turn prompt in a fresh conversation. Caller must hold inferenceMutex.
+    private fun runInference(
+        prompt: String,
+        sampler: SamplerConfig,
+        systemInstruction: String? = null
+    ): String {
+        val activeEngine = engine ?: throw IllegalStateException("Model not loaded")
+        val config = ConversationConfig(
+            systemInstruction = systemInstruction?.let { Contents.of(it) },
+            samplerConfig = sampler
+        )
+        return activeEngine.createConversation(config).use { conversation ->
+            val text = conversation.sendMessage(prompt).contents.contents
+                .filterIsInstance<Content.Text>()
+                .joinToString("") { it.text }
+                .trim()
+            if (BuildConfig.DEBUG) logBenchmark(conversation)
+            text
+        }
+    }
+
+    @OptIn(ExperimentalApi::class)
+    private fun logBenchmark(conversation: Conversation) {
+        try {
+            val info = conversation.getBenchmarkInfo()
+            Log.d(
+                "GemmaManager",
+                "Inference: prefill ${info.lastPrefillTokenCount} tok @ %.1f tok/s, decode ${info.lastDecodeTokenCount} tok @ %.1f tok/s, TTFT %.2fs"
+                    .format(info.lastPrefillTokensPerSecond, info.lastDecodeTokensPerSecond, info.timeToFirstTokenInSecond)
+            )
+        } catch (e: Exception) {
+            Log.d("GemmaManager", "Benchmark info unavailable: ${e.message}")
         }
     }
 
@@ -132,13 +235,14 @@ KEY RULES:
             _state.value = GemmaState.INFERRING
 
             try {
-                // Safeguard: clamp context length so prompt never overflows the model's token capacity
-                val safeMemory = if (memoryContext.length > 1200) memoryContext.takeLast(1200) else memoryContext
+                // Safeguard: clamp context length so the prompt fits the KV-cache
+                val safeMemory = memoryContext.takeLast(MAX_MEMORY_CONTEXT_CHARS)
                 val prompt = buildPrompt(userInput, safeMemory, taskContext, onlineData)
-                val response = llmInference?.generateResponse(prompt) ?: "I couldn't process that."
+                val response = runInference(prompt, CHAT_SAMPLER, SYSTEM_PROMPT)
                 _state.value = GemmaState.READY
-                response.trim()
+                response.ifBlank { "I couldn't process that." }
             } catch (e: Exception) {
+                Log.e("GemmaManager", "Response inference error: ${e.message}")
                 _state.value = GemmaState.READY
                 "I'm having trouble processing that right now. Please try again."
             }
@@ -146,7 +250,7 @@ KEY RULES:
     }
 
     /**
-     * Filters recorded speech through Gemma 2B:
+     * Filters recorded speech through Gemma:
      * - Returns null if the text is small talk, filler, or gibberish.
      * - Returns a 1-sentence summary if it contains important facts, decisions, or commitments.
      */
@@ -156,22 +260,17 @@ KEY RULES:
         inferenceMutex.withLock {
             _state.value = GemmaState.INFERRING
             try {
-                // Safeguard: clamp text length to prevent native buffer overflow
-                val safeText = if (conversationText.length > 800) conversationText.takeLast(800) else conversationText
-                val prompt = """<start_of_turn>user
-You are an intelligent memory filter for a personal AI companion.
+                val safeText = conversationText.takeLast(MAX_EVALUATION_CHARS)
+                val prompt = """You are an intelligent memory filter for a personal AI companion.
 Analyze the following recorded speech:
-\"\"\"
+""${'"'}
 $safeText
-\"\"\"
+""${'"'}
 
 Determine if this speech contains meaningful information, facts, decisions, commitments, or tasks worth remembering.
 - If it is meaningless filler, small talk, gibberish, or casual noise (e.g., "yeah", "ok", "no", "haha"), reply with ONLY: DISCARD
-- If it contains valuable information or action items, summarize the key takeaway in 1 clear, concise sentence.
-<end_of_turn>
-<start_of_turn>model
-"""
-                val response = llmInference?.generateResponse(prompt)?.trim() ?: "DISCARD"
+- If it contains valuable information or action items, summarize the key takeaway in 1 clear, concise sentence."""
+                val response = runInference(prompt, PRECISE_SAMPLER).ifBlank { "DISCARD" }
                 _state.value = GemmaState.READY
                 if (response.startsWith("DISCARD", ignoreCase = true) || response.length < 5) {
                     null
@@ -179,6 +278,7 @@ Determine if this speech contains meaningful information, facts, decisions, comm
                     response
                 }
             } catch (e: Exception) {
+                Log.e("GemmaManager", "Memory evaluation error: ${e.message}")
                 _state.value = GemmaState.READY
                 null
             }
@@ -187,9 +287,9 @@ Determine if this speech contains meaningful information, facts, decisions, comm
 
     /**
      * Extracts all actionable tasks and deadlines from spoken text into clean titles and deadlines.
-     * Uses on-device Gemma 2B when ready, with high-precision pattern extraction as fallback.
+     * Uses on-device Gemma when ready, with high-precision pattern extraction as fallback.
      */
-     suspend fun extractAllTasks(rawText: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+    suspend fun extractAllTasks(rawText: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         val fallbackTasks = fallbackMultiTaskExtraction(rawText)
 
         if (_state.value != GemmaState.READY || rawText.isBlank()) {
@@ -199,18 +299,14 @@ Determine if this speech contains meaningful information, facts, decisions, comm
         inferenceMutex.withLock {
             _state.value = GemmaState.INFERRING
             try {
-                val prompt = """<start_of_turn>user
-Extract all actionable tasks and commitments from this spoken text into concise task titles (max 6 words, starting with an imperative verb) and any mentioned deadline.
+                val prompt = """Extract all actionable tasks and commitments from this spoken text into concise task titles (max 6 words, starting with an imperative verb) and any mentioned deadline.
 Speech: "$rawText"
 
 If tasks are found, output each task on a new line EXACTLY like this:
 TASK: [short action item] | TIME: [deadline if mentioned, otherwise None]
 
-If no actionable tasks are found, output: NONE
-<end_of_turn>
-<start_of_turn>model
-"""
-                val response = llmInference?.generateResponse(prompt)?.trim() ?: ""
+If no actionable tasks are found, output: NONE"""
+                val response = runInference(prompt, PRECISE_SAMPLER)
                 _state.value = GemmaState.READY
 
                 val gemmaTasks = mutableListOf<Pair<String, String>>()
@@ -320,8 +416,7 @@ If no actionable tasks are found, output: NONE
         inferenceMutex.withLock {
             _state.value = GemmaState.INFERRING
             try {
-                val prompt = """<start_of_turn>user
-You are an intelligent ambient speech corrector. Spoken English was recorded by a phone microphone across the room and transcribed by an offline speech recognizer. It may contain phonetic errors, homophones, or misheard technical/domain words (e.g., "date and friendship" -> "data pipeline", "iceberk" -> "iceberg", "caugh car" -> "kafka").
+                val prompt = """You are an intelligent ambient speech corrector. Spoken English was recorded by a phone microphone across the room and transcribed by an offline speech recognizer. It may contain phonetic errors, homophones, or misheard technical/domain words (e.g., "date and friendship" -> "data pipeline", "iceberk" -> "iceberg", "caugh car" -> "kafka").
 
 Tasks:
 1. Fix obvious speech recognition mistakes into sensible, coherent natural English based on context.
@@ -330,10 +425,8 @@ Tasks:
 4. Output ONLY the cleaned transcript with no preamble or explanation.
 
 Raw speech: "$rawText"
-Cleaned text:<end_of_turn>
-<start_of_turn>model
-"""
-                val response = llmInference?.generateResponse(prompt)?.trim() ?: ""
+Cleaned text:"""
+                val response = runInference(prompt, PRECISE_SAMPLER)
                 _state.value = GemmaState.READY
 
                 if (response.isNotBlank() &&
@@ -367,8 +460,6 @@ Cleaned text:<end_of_turn>
         onlineData: String
     ): String {
         val sb = StringBuilder()
-        sb.append("<start_of_turn>user\n")
-        sb.append("You are Aura, an on-device personal AI companion. Keep answers concise, factual, and direct.\n\n")
 
         if (memoryContext.isNotBlank()) {
             sb.append("RECORDED CONVERSATION HISTORY:\n$memoryContext\n\n")
@@ -383,20 +474,14 @@ Cleaned text:<end_of_turn>
         }
 
         sb.append("USER REQUEST: $userInput\n")
-        sb.append("Answer directly based on the context above.<end_of_turn>\n")
-        sb.append("<start_of_turn>model\n")
+        sb.append("Answer directly based on the context above.")
         return sb.toString()
     }
 
     fun isReady() = _state.value == GemmaState.READY
 
     fun destroy() {
-        try {
-            llmInference?.close()
-        } catch (e: Exception) {
-            // Ignore
-        }
-        llmInference = null
+        closeEngine()
         _activeModelPath.value = null
         _state.value = GemmaState.NOT_LOADED
     }

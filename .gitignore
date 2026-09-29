@@ -20,6 +20,7 @@ out/
 build/
 app/build/
 .gradle/
+.kotlin/
 
 # Local configuration file (Contains your SDK path and API keys!)
 local.properties
@@ -50,6 +51,9 @@ ehthumbs.db
 *.task
 *.tflite
 *.onnx
+*.litertlm
+*.patch
+.idea/
 
 # Log files
 *.log

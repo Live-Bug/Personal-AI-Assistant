@@ -25,6 +25,8 @@
         android:theme="@style/Theme.Aura"
         android:usesCleartextTraffic="false">
 
+        <!-- GPU backend for LiteRT-LM (OpenCL); optional so CPU-only devices can still install -->
+        <uses-native-library android:name="libvndksupport.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL-car.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL-pixel.so" android:required="false"/>

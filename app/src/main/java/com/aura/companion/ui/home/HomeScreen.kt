@@ -103,13 +103,14 @@ fun HomeScreen(viewModel: AuraViewModel) {
                     val modelLabel = when {
                         uiState.isModelLoading -> "Loading..."
                         !uiState.isModelReady -> "Select Model"
-                        uiState.activeModelPath.contains("gemma-2b", ignoreCase = true) -> "Gemma 2B"
+                        uiState.activeModelPath.contains("gemma-4-e2b", ignoreCase = true) ->
+                            if (uiState.activeBackend.isNotBlank()) "E2B · ${uiState.activeBackend}" else "Gemma 4"
                         uiState.activeModelPath.contains("gemma", ignoreCase = true) -> "Gemma"
                         uiState.activeModelPath.isNotBlank() -> {
                             val name = uiState.activeModelPath.substringAfterLast('/').substringBeforeLast('.')
                             if (name.length > 9) name.take(8) + "…" else name
                         }
-                        else -> "Gemma 2B"
+                        else -> "Gemma 4"
                     }
 
                     // Model path / selector badge
@@ -252,7 +253,7 @@ fun HomeScreen(viewModel: AuraViewModel) {
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                     color = Purple80
                 )
-                Text("Loading local Gemma 2B model...",
+                Text("Loading Gemma 4 E2B on GPU...",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
                     modifier = Modifier.padding(top = 4.dp).fillMaxWidth(),
@@ -293,7 +294,7 @@ fun HomeScreen(viewModel: AuraViewModel) {
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Select Model File (.bin)", style = MaterialTheme.typography.labelMedium)
+                            Text("Select Model File (.litertlm)", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }

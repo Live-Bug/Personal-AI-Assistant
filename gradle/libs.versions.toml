@@ -1,18 +1,19 @@
 [versions]
-agp = "8.5.2"
-kotlin = "2.0.0"
+agp = "8.13.2"
+kotlin = "2.3.21"
 coreKtx = "1.13.1"
 appcompat = "1.7.0"
 lifecycle = "2.8.5"
 activityCompose = "1.9.2"
 composeBom = "2024.09.00"
 navigationCompose = "2.8.1"
-room = "2.6.1"
+room = "2.8.5"
 retrofit = "2.11.0"
 okhttp = "4.12.0"
 gson = "2.10.1"
 coroutines = "1.8.1"
-mediapipe = "0.10.22"
+litertlm = "0.17.1"
+ksp = "2.3.12"
 datastore = "1.1.1"
 
 [libraries]
@@ -39,10 +40,10 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipe" }
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version = "2.0.0" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

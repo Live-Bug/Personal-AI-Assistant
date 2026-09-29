@@ -37,7 +37,7 @@ fun PrivacyScreen(viewModel: AuraViewModel) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GuaranteeCard(Modifier.weight(1f), Icons.Filled.MicOff, "No Audio Upload", "Audio processed locally, never sent")
-                GuaranteeCard(Modifier.weight(1f), Icons.Filled.Memory, "Local AI", "Gemma 2B runs on-device only")
+                GuaranteeCard(Modifier.weight(1f), Icons.Filled.Memory, "Local AI", "Gemma 4 runs on-device only")
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GuaranteeCard(Modifier.weight(1f), Icons.Filled.Lock, "Local Memory", "SQLite on-device, zero cloud sync")

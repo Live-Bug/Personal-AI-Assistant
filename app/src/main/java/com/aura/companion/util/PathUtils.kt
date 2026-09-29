@@ -98,7 +98,7 @@ object PathUtils {
 
     private fun copyToInternalStorage(context: Context, uri: Uri): String? {
         return try {
-            val name = getFileName(context, uri) ?: "custom_gemma_model.bin"
+            val name = getFileName(context, uri) ?: "custom_gemma_model.litertlm"
             val destFile = File(context.filesDir, name)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(destFile).use { output ->
