@@ -28,7 +28,7 @@ cd Personal-AI-Assistant
 ### 2. Configure `local.properties` (API Key)
 In the project root directory, create or edit `local.properties` and add:
 ```properties
-WEATHER_API_KEY=8607b8473f6168d5cc58040b2579bd38
+WEATHER_API_KEY=""
 ```
 *(This file is git-ignored to keep credentials safe).*
 
