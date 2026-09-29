@@ -1,0 +1,58 @@
+# ====================================================================
+# Android Studio & Gradle Standard Git Ignore
+# ====================================================================
+
+# Built application files
+*.apk
+*.aar
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files & Build outputs
+bin/
+gen/
+out/
+build/
+app/build/
+.gradle/
+
+# Local configuration file (Contains your SDK path and API keys!)
+local.properties
+
+# Proguard / Dexguard
+proguard/
+
+# Android Studio / IntelliJ IDEA files
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/deploymentTargetSelector.xml
+.idea/shelf/
+.idea/compiler.xml
+.idea/misc.xml
+
+# Operating System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Large Model weights (NEVER commit 1.5GB binary models to Git!)
+*.bin
+*.task
+*.tflite
+*.onnx
+
+# Log files
+*.log
+
+# Scratch scripts
+scratch/
