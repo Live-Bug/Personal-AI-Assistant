@@ -492,7 +492,10 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                         statusText = "Fetching live data..."
                     )
                     onlineData = when (queryType) {
-                        OnlineQueryType.WEATHER -> onlineLookup.fetchWeather()
+                        OnlineQueryType.WEATHER -> {
+                            val targetCity = onlineLookup.extractCity(query)
+                            onlineLookup.fetchWeather(targetCity)
+                        }
                         OnlineQueryType.NEWS -> onlineLookup.fetchNews()
                         else -> ""
                     }
@@ -523,6 +526,8 @@ class AuraViewModel(application: Application) : AndroidViewModel(application) {
                         taskContext = pendingTasks,
                         onlineData = onlineData
                     )
+                } else if (onlineData.isNotBlank()) {
+                    onlineData
                 } else {
                     getFallbackResponse(query, pendingTasks)
                 }

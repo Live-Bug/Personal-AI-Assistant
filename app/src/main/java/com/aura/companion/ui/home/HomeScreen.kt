@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -20,10 +21,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import com.aura.companion.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -79,12 +83,35 @@ fun HomeScreen(viewModel: AuraViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("AURA", style = MaterialTheme.typography.headlineMedium, color = Purple80)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(id = R.drawable.app_logo),
+                        contentDescription = "Aura Logo",
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("AURA", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Purple80)
+                }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    // Formatted short label to prevent pushing right badge off screen
+                    val modelLabel = when {
+                        uiState.isModelLoading -> "Loading..."
+                        !uiState.isModelReady -> "Select Model"
+                        uiState.activeModelPath.contains("gemma-2b", ignoreCase = true) -> "Gemma 2B"
+                        uiState.activeModelPath.contains("gemma", ignoreCase = true) -> "Gemma"
+                        uiState.activeModelPath.isNotBlank() -> {
+                            val name = uiState.activeModelPath.substringAfterLast('/').substringBeforeLast('.')
+                            if (name.length > 9) name.take(8) + "…" else name
+                        }
+                        else -> "Gemma 2B"
+                    }
+
                     // Model path / selector badge
                     Surface(
                         color = if (uiState.isModelReady) Purple80.copy(alpha = 0.15f)
@@ -96,7 +123,7 @@ fun HomeScreen(viewModel: AuraViewModel) {
                         }
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
@@ -108,20 +135,14 @@ fun HomeScreen(viewModel: AuraViewModel) {
                                 modifier = Modifier.size(12.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            val modelLabel = if (uiState.activeModelPath.isNotBlank()) {
-                                uiState.activeModelPath.substringAfterLast('/')
-                            } else if (uiState.isModelLoading) {
-                                "Loading..."
-                            } else {
-                                "Select Model"
-                            }
                             Text(
                                 modelLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (uiState.isModelReady) Purple80
                                         else if (uiState.isModelLoading) TextSecondary
                                         else MutedRed,
-                                maxLines = 1
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -133,7 +154,7 @@ fun HomeScreen(viewModel: AuraViewModel) {
                         shape = RoundedCornerShape(16.dp)
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
@@ -146,7 +167,9 @@ fun HomeScreen(viewModel: AuraViewModel) {
                             Text(
                                 if (uiState.onlineCallActive) "Online" else "Local",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (uiState.onlineCallActive) OnlineBlue else OfflineGray
+                                color = if (uiState.onlineCallActive) OnlineBlue else OfflineGray,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
